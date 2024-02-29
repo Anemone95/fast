@@ -6,9 +6,42 @@ const path = require('path');
 const builtInModules = require('module').builtinModules;
 const ansicolor = require('ansicolor').nice;
 
+function resolveModulePath(currentFile, moduleName,p) {
+    if (moduleName.startsWith('./') || moduleName.startsWith('../')) {
+        const resolvedPath = path.resolve(path.dirname(currentFile), moduleName);
+        if (fs.existsSync(resolvedPath)) {
+            return [resolvedPath, p];
+        }
+        const possibleExtensions = ['.js', '.json', '.node'];
+        for (const ext of possibleExtensions) {
+            if (fs.existsSync(resolvedPath + ext)) {
+                return [resolvedPath + ext, p];
+            }
+        }
+    } else {
+        let dir = path.dirname(currentFile);
+        while (dir !== path.dirname(dir)) {
+            const modulePath = path.join(dir, 'node_modules', moduleName);
+            if (fs.existsSync(modulePath)) {
+                const packageJsonPath = path.join(modulePath, 'package.json');
+                if (fs.existsSync(packageJsonPath)) {
+                    const mainFile = require(packageJsonPath).main || 'index.js';
+                    return [path.resolve(modulePath, mainFile), modulePath];
+                }
+                if (fs.existsSync(path.join(modulePath, 'index.js'))) {
+                    return [path.join(modulePath, 'index.js'), modulePath];
+                }
+            }
+            dir = path.dirname(dir);
+        }
+    }
+
+    return null;
+}
+
 function searchModule(moduleName, requiredBy) {
-    var selfBuiltPackages = ['yargs', 'execa', 'express', 'send', 'async', 'mz/child_process', 'denodeify','commander', 'platform-command', 'grunt', 'pm', 'boom', 'async'];
-    selfBuiltPackages = selfBuiltPackages.concat(['mongodb', 'monk']);
+    var selfBuiltPackages = [];
+    selfBuiltPackages = selfBuiltPackages.concat([]);
     if (builtInModules.includes(moduleName) || selfBuiltPackages.indexOf(moduleName) >= 0) {
         // console.error(`${moduleName.blue.bright} is a built-in module.`);
         let searchPaths = new Set();
