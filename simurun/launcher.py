@@ -181,11 +181,13 @@ def main():
     print("Statements:", len(G.covered_stat), total_num_stat)
     print("Functions:", len(G.covered_func), G.get_total_num_functions())
     # G.relabel_nodes()
-    G.export_to_CSV("./opg_nodes.tsv", "./opg_rels.tsv")
     logger.log(ATTENTION, 'Analysis finished at ' +
         datetime.today().strftime('%Y-%m-%d %H:%M:%S') +
         ', Time spent: %.3fs' % (time.time() - start_time))
-
+    print(ATTENTION, 'Call graph analysis finished at ' +
+               datetime.today().strftime('%Y-%m-%d %H:%M:%S') +
+               ', Time spent: %.3fs' % (time.time() - start_time))
+    G.export_to_CSV("./opg_nodes.tsv", "./opg_rels.tsv")
     # Vulnerability checking
     if G.proto_pollution:
         logger.debug(sty.ef.inverse + 'prototype pollution' + sty.rs.all)
