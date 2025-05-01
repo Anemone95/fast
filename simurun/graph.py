@@ -347,9 +347,12 @@ class Graph:
 
     def get_edges_between(self, u, v, edge_type = None) -> dict:
         result = {}
-        for key, edge_attr in self.graph[u][v].items():
-            if not edge_type or edge_attr.get('type:TYPE') == edge_type:
-                result[key] = edge_attr
+        try:
+            for key, edge_attr in self.graph[u][v].items():
+                if not edge_type or edge_attr.get('type:TYPE') == edge_type:
+                    result[key] = edge_attr
+        except KeyError:
+            pass
         return result
 
     def remove_edge(self, u, v, key=None):
@@ -621,7 +624,7 @@ class Graph:
         self.for_stack = [] # for debugging
         self.caller_counter = DictCounter() # callers (instead of callees)
         self.caller_stack = []
-        self.call_limit = 1 # 3
+        self.call_limit = 3 # 3
         self.file_stack = []
         self.require_obj_stack = []
         self.function_returns = defaultdict(lambda: [])
@@ -1861,7 +1864,7 @@ class Graph:
 
     # Analysis
 
-    def _dfs_upper_by_edge_type(self, source=None, edge_type='OBJ_REACHES', depth_limit=None):
+    def _dfs_upper_by_edge_type(self, source=None, edge_type='OBJ_REACHES', depth_limit=None, sinks=[]):
         """
         dfs a specific type of edge upper from a node id
 
@@ -1875,45 +1878,67 @@ class Graph:
         start_time = time.time()
         G = self.graph
         pathes = []
+        start = source
         if source is None:
-            # edges for all components
-            nodes = G
-        else:
-            # edges for components with source
-            nodes = [source]
-        visited = set()
+            return [[]]
         if depth_limit is None:
             depth_limit = len(G)
-        for start in nodes:
-            # we do not have a global visited
-            # each path, or stack should have a visited list but not global
-            """
-            if start in visited:
-                continue
-            visited.add(start)
-            """
+        # we do not have a global visited
+        # each path, or stack should have a visited list but not global
+        """
+        if start in visited:
+            continue
+        visited.add(start)
+        """
+        # we do dfs on top of sub-graphs to save time
+        sub_graph = self.get_sub_graph_by_edge_type(edge_type)
+        backup_graph = self.graph
+        self.graph = sub_graph
 
-            edge_group = self.get_in_edges(start, edge_type=edge_type)
-            nodes_group = set(edge[0] for edge in edge_group)
+        edge_group = self.get_in_edges(start, edge_type=edge_type)
+        nodes_group = set([edge[0] for edge in edge_group])
+        if len(nodes_group) == 0:
+            # we only have 1 start node, just return this node
+            self.graph = backup_graph 
+            return [[start]]
 
-            stack = [(start, depth_limit, iter(nodes_group))]
-            while stack:
-                parent, depth_now, children = stack[-1]
-                try:
-                    child = next(children)
-                    if child not in [s[0] for s in stack]:
-                        visited.add(child)
-                        if depth_now > 1:
-                            edge_group = self.get_in_edges(child, edge_type=edge_type)
-                            nodes_group = set(edge[0] for edge in edge_group)
-                            stack.append((child, depth_now - 1, iter(nodes_group)))
-                            if len(nodes_group) == 0:
-                                new_path = [node[0] for node in stack]
-                                str_pathes = [str(p) for p in pathes]
-                                if str(new_path) not in str_pathes:
-                                    pathes.append(new_path)
-                except StopIteration:
-                    stack.pop()
+        stack = [(start, depth_limit, iter(nodes_group))]
+        visited = set()
+        visited.add(start)
+        while stack:
+            parent, depth_now, children = stack[-1]
+            if parent in sinks:
+                # if goes to a sink node, stop searching further and add path
+                new_path = [node[0] for node in stack]
+                str_pathes = [str(p) for p in pathes]
+                if str(new_path) not in str_pathes:
+                    pathes.append(new_path)
+                poped = stack.pop()
+                visited.remove(poped[0])
+            try:
+                child = next(children)
+                if child not in [s[0] for s in stack]:
+                    if child in visited:
+                        continue
+                    visited.add(child)
+                    # incase deadloop
+                    if depth_now > 1:
+                        edge_group = self.get_in_edges(child, edge_type=edge_type)
+                        nodes_group = set([edge[0] for edge in edge_group])
+                        stack.append((child, depth_now - 1, iter(nodes_group)))
+                        if len(nodes_group) == 0 and not (sinks and child not in sinks):
+                            # exclude non-sink nodes if sinks are specified
+                            new_path = [node[0] for node in stack]
+                            str_pathes = [str(p) for p in pathes]
+                            if str(new_path) not in str_pathes:
+                                pathes.append(new_path)
+            except StopIteration:
+                poped = stack.pop()
+                visited.remove(poped[0])
+        pathes.sort(key=lambda x: -len(x))
+
+        self.graph = backup_graph
+        return pathes
         self.timing('_dfs_upper_by_edge_type', time.time() - start_time)
         return pathes
 
@@ -1950,13 +1975,16 @@ class Graph:
         return the dict with numbers and contents
         """
         file_name = self.get_node_file_path(node_id)
-        if file_name is None:
+        if file_name is None or file_name == 'stdin':
             return None
         if file_name not in self.file_contents:
             content_dict = ['']
-            with open(file_name, 'r') as fp:
-                for file_line in fp:
-                    content_dict.append(file_line)
+            try:
+                with open(file_name, 'r') as fp:
+                    for file_line in fp:
+                        content_dict.append(file_line)
+            except FileNotFoundError:
+                return None
             self.file_contents[file_name] = content_dict.copy()
         return self.file_contents[file_name]
 
@@ -2051,6 +2079,45 @@ class Graph:
                         # pass
         return content
 
+    def get_code_from_file(self, ast_node):
+        content = self.get_node_file_content(ast_node)
+        if content is None:
+            return None
+        location = self.get_node_attr(ast_node).get('namespace', '').strip()
+        output = str()
+        if location:
+            sl, sc, el, ec = location.split(':')
+            if not el:
+                el = sl
+            try:
+                sl = int(sl)
+                el = int(el)
+                if sc:
+                    sc = int(sc)
+                else:
+                    sc = 0
+                if ec:
+                    ec = int(ec)
+                else:
+                    ec = sys.maxsize
+                for l in range(sl, el + 1):
+                    try:
+                        line = content[l]
+                        if l == sl and l == el:
+                            line = line[sc:ec]
+                        elif l == sl and l != el:
+                            line = line[sc:]
+                        elif l != sl and l == el:
+                            line = line[0:ec]
+                        output += line
+                    except IndexError:
+                        pass
+            except (ValueError, TypeError) as e:
+                self.logger.error(e)
+        else:
+            return None
+        return output
+
     def check_signature_functions(self, func_names):
         """
         checking whether one of the func_names exist in the graph
@@ -2103,5 +2170,41 @@ class Graph:
                     else:
                         self.all_func.add(n)
         return len(self.all_func)
+
+    def extend_path_by_cf(self, path):
+        path = list(path)
+        new_path = []
+        for i in range(len(path) - 1):
+            # print(f'path {i} is {path[i]}')
+            cur, next = path[i], path[i + 1] # for every pair of nodes in the DF path
+            new_path.append(cur)
+            # print('cur', cur, 'next', next)
+            if cur == next:
+                new_path.append(next)
+                continue
+            included_objs = set() # only consider objs on the DF edges between this pair of nodes
+            for e in self.get_edges_between(cur, next, edge_type='OBJ_REACHES').values():
+                obj = e.get('obj')
+                if obj is not None:
+                    included_objs.add(obj)
+            new_nodes = set()
+            # search CF paths between the pair of nodes
+            for cf_path in self._dfs_upper_by_edge_type(source=next, edge_type='FLOWS_TO', sinks=[cur]):
+                # this function is reverse search
+                for node in reversed(cf_path):
+                    if node == cur:
+                        continue
+                    # print('node is', node)
+                    # if any of the objs are used in a statement in the CF path in between
+                    # we check this by checking if there is a DF edge
+                    for e in self.get_edges_between(cur, node, edge_type='OBJ_REACHES').values():
+                        if e.get('obj') in included_objs:
+                            new_nodes.add(node)
+                            break
+            new_nodes.remove(next)
+            new_nodes = sorted(list(new_nodes))
+            new_path.extend(new_nodes)
+        new_path.append(path[-1])
+        return new_path
 
 

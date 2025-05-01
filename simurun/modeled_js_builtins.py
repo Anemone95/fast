@@ -36,6 +36,7 @@ def setup_js_builtins(G: Graph):
     setup_regexp(G)
     setup_math(G)
     setup_promise(G)
+    setup_proxy(G)
     G.add_blank_func_to_scope('Date', scope=G.BASE_SCOPE, python_func=blank_func)
     G.add_obj_to_name('__opgWildcard', value=wildcard, scope=G.BASE_SCOPE)
     opg_tainted_obj = G.add_obj_to_name('__opgTainted', scope=G.BASE_SCOPE)
@@ -44,15 +45,28 @@ def setup_js_builtins(G: Graph):
     G.set_node_attr(opg_tainted_wildcard_obj, ('tainted', True))
     opg_tainted_fake_arg_cons = G.add_blank_func_to_scope(
         '__OpgTaintedFakeArg', scope=G.BASE_SCOPE, python_func=opg_tainted_fake_arg_constructor)
+    G.add_blank_func_to_scope(
+        '__opgMarkTaintedFakeArg', scope=G.BASE_SCOPE, python_func=opg_mark_tainted_fake_arg)
     G.builtin_constructors.append(opg_tainted_fake_arg_cons)
     G.add_blank_func_to_scope('__opgCombine', scope=G.BASE_SCOPE, python_func=opg_combine)
 
 
 def opg_tainted_fake_arg_constructor(G: Graph, call_ast, extra, _, *args):
-    returned_obj = G.add_obj_node(call_ast)
+    returned_obj = G.add_obj_node(call_ast, js_type=None, value=wildcard)
     G.set_node_attr(returned_obj, ('tainted', True))
     G.set_node_attr(returned_obj, ('fake_arg', True))
     return NodeHandleResult(obj_nodes=[returned_obj])
+
+
+def opg_mark_tainted_fake_arg(G: Graph, call_ast, extra, _, *args):
+    returned_objs = []
+    for arg in args:
+        for obj in to_obj_nodes(G, arg, call_ast):
+            G.set_node_attr(obj, ('tainted', True))
+            G.set_node_attr(obj, ('fake_arg', True))
+            G.set_node_attr(obj, ('code', wildcard))
+            returned_objs.append(obj)
+    return NodeHandleResult(obj_nodes=returned_objs)
 
 
 def opg_combine(G: Graph, call_ast, extra, _, *args):
@@ -152,6 +166,11 @@ def setup_errors(G: Graph):
     #     cons = G.add_blank_func_to_scope(i, scope=G.BASE_SCOPE)
     #     prototype = G.get_prop_obj_nodes(prop_name='prototype', parent_obj=cons)[0]
     #     G.add_obj_as_prop(prop_name='__proto__', parent_obj=prototype, tobe_added_obj=error_prototype)
+
+
+def error_constructor(G: Graph, call_ast, extra, _, message=NodeHandleResult()):
+    error_obj = G.add_obj_node(call_ast)
+    G.set_node_attr(error_obj)
 
 
 def setup_object_and_function(G: Graph):
@@ -273,19 +292,22 @@ def array_p_for_each_value(G: Graph, caller_ast, extra, array=NodeHandleResult()
                 index_arg = NodeHandleResult(values=[float(name)])
             obj_nodes_log = ', '.join([f'{sty.fg.green}{obj}{sty.rs.all}: {G.get_node_attr(obj).get("code")}' for obj in obj_nodes])
             logger.debug(f'Array forEach callback arguments: index={name}, length~={len(name_nodes)}, obj_nodes={obj_nodes_log}, array={arr}')
+            for_stack_item_added = False
             def add_for_stack(G, **kwargs):
-                nonlocal name, name_nodes, array
+                nonlocal name, name_nodes, array, for_stack_item_added
                 # full functional for-stack
                 # (type, ast node, scope, loop var name, loop var value, loop var value list, loop var origin list)
                 # print('array for each', caller_ast, G.cur_scope, loop_var_name, name, G.get_prop_obj_nodes(arr, numeric_only=True), array.obj_nodes)
                 G.for_stack.append(('array for each', caller_ast, G.cur_scope, loop_var_name, name, G.get_prop_obj_nodes(arr, numeric_only=True), array.obj_nodes))
+                for_stack_item_added = True
             opgen.call_function(G, callback.obj_nodes,
                 args=[NodeHandleResult(name_nodes=[name_node], name=name,
                     obj_nodes=obj_nodes), index_arg, 
                     NodeHandleResult(name=array.name, obj_nodes=[arr])],
                 this=this, extra=extra, call_ast=caller_ast,
                 python_callback=add_for_stack)
-            G.for_stack.pop()
+            if for_stack_item_added:
+                G.for_stack.pop()
     return NodeHandleResult(obj_nodes=[G.undefined_obj])
 
 
@@ -633,7 +655,7 @@ def array_p_join_2(G: Graph, caller_ast, extra, arrays: NodeHandleResult, seps=N
                     _index = int(index)
                 except (ValueError, TypeError) as e:
                     pass
-                if _index is None:
+                if _index is None or _index < 0:
                     wildcard_elems.extend(G.get_objs_by_name_node(index_name_node))
                 else:
                     while len(array_elems) <= _index:
@@ -660,6 +682,8 @@ def array_p_join_2(G: Graph, caller_ast, extra, arrays: NodeHandleResult, seps=N
             used_objs.add(arr)
             used_objs.update(sep_sources[i])
             op_index += 1
+            if len(returned_objs) > 100:
+                break
     return NodeHandleResult(obj_nodes=returned_objs, used_objs=list(used_objs))
 
 
@@ -682,7 +706,7 @@ def array_p_join_3(G: Graph, caller_ast, extra, arrays: NodeHandleResult, seps=N
                     _index = int(index)
                 except (ValueError, TypeError) as e:
                     pass
-                if _index is None:
+                if _index is None or _index < 0:
                     wildcard_elems.extend(G.get_objs_by_name_node(index_name_node))
                 else:
                     while len(array_elems) <= _index:
@@ -1111,13 +1135,14 @@ def blank_func(G: Graph, caller_ast, extra, _, *args):
     return NodeHandleResult(used_objs=used_objs)
 
 
-def func_calling_func(G: Graph, caller_ast, extra, _, *args):
-    dummy_return_obj = G.add_obj_node(caller_ast, value=wildcard)
+def func_calling_func(G: Graph, call_ast, extra, _, *args):
+    dummy_return_obj = G.add_obj_node(call_ast, value=wildcard)
     used_objs = set()
     for arg in args:
         filtered_objs = list(filter(lambda obj:
             G.get_node_attr(obj).get('type') == 'function', arg.obj_nodes))
-        results, _ = opgen.call_function(G, filtered_objs, extra=extra)
+        results, _ = opgen.call_function(
+            G, filtered_objs, extra=extra, call_ast=call_ast)
         used_objs.update(results.obj_nodes)
     add_contributes_to(G, used_objs, dummy_return_obj)
     return NodeHandleResult(obj_nodes=[dummy_return_obj], used_objs=list(used_objs))
@@ -1175,8 +1200,10 @@ def setup_global_objs(G: Graph):
 
     process_obj = G.add_obj_to_scope(name='process', scope=G.BASE_SCOPE, js_type='object', value=wildcard)
     G.set_node_attr(process_obj, ('fake_arg', True))
+    G.set_node_attr(process_obj, ('tainted', True))
     argv = G.add_obj_as_prop(prop_name='argv', parent_obj=process_obj, js_type='array', value=wildcard)
     G.set_node_attr(argv, ('fake_arg', True))
+    G.set_node_attr(argv, ('tainted', True))
     version_obj = G.add_obj_as_prop(prop_name='versions', parent_obj=process_obj, js_type='object', value=wildcard)
     G.add_obj_as_prop(prop_name='modules', parent_obj=version_obj, js_type='string', value=wildcard)
     G.add_obj_as_prop(prop_name='platform', parent_obj=process_obj, js_type='string', value=wildcard)
@@ -1905,7 +1932,7 @@ def setup_promise(G: Graph):
     G.promise_cons = promise_cons
     G.builtin_constructors.append(promise_cons)
     G.promise_prototype = promise_prototype
-    G.promise_p_then = G.add_blank_func_as_prop('then', promise_prototype, promise_p_then) # dangerous!
+    G.promise_p_then = G.add_blank_func_as_prop('then', promise_prototype, promise_p_then) # dangerous! # why?
     G.add_blank_func_as_prop('catch', promise_prototype, promise_p_catch)
     G.add_blank_func_as_prop('finally', promise_prototype, promise_p_finally)
     G.add_blank_func_as_prop('resolve', promise_cons, promise_resolve)
@@ -1932,7 +1959,7 @@ def promise_constructor(G: Graph, call_ast, extra, _, executor=NodeHandleResult(
         child_type='DUMMY_STMT')[0]
     opgen.call_function(G, executors,
         args=[NodeHandleResult(obj_nodes=[resolve_obj]), NodeHandleResult(obj_nodes=[reject_obj])],
-        extra=extra, call_ast=dummy_stmt_ast, promise_related=True)
+        extra=extra, call_ast=dummy_stmt_ast if G.new_trace_rule else call_ast, promise_related=True)
     return NodeHandleResult(obj_nodes=[promise], used_objs=executors)
 
 
@@ -1954,7 +1981,8 @@ def promise_p_then(G: Graph, call_ast, extra, this, on_fulfilled=NodeHandleResul
                 fulfilled_with = NodeHandleResult(values=[wildcard])
             if fulfilled_with is not None: # the promise is possibly fulfilled
                 result, _ = opgen.call_function(G, on_fulfilled.obj_nodes,
-                    args=[fulfilled_with], call_ast=dummy_stmt_ast, promise_related=True)
+                    args=[fulfilled_with], promise_related=True,
+                    call_ast=dummy_stmt_ast if G.new_trace_rule else call_ast)
                 G.set_node_attr(new_promise, ('fulfilled_with', result))
                 flag = True
             rejected_with = G.get_node_attr(promise).get('rejected_with')
@@ -1962,7 +1990,8 @@ def promise_p_then(G: Graph, call_ast, extra, this, on_fulfilled=NodeHandleResul
                 rejected_with = NodeHandleResult(values=[wildcard])
             if rejected_with is not None: # the promise is possibly rejected
                 result, _ = opgen.call_function(G, on_rejected.obj_nodes,
-                    args=[rejected_with], call_ast=dummy_stmt_ast, promise_related=True)
+                    args=[rejected_with], promise_related=True,
+                    call_ast=dummy_stmt_ast if G.new_trace_rule else call_ast)
                 G.set_node_attr(new_promise, ('rejected_with', result))
                 flag = True
             # if flag: # the promise is neither fulfilled or rejected
@@ -1972,24 +2001,32 @@ def promise_p_then(G: Graph, call_ast, extra, this, on_fulfilled=NodeHandleResul
     return NodeHandleResult(obj_nodes=[new_promise], used_objs=old_promises)
 
 
-def promise_p_catch(G: Graph, caller_ast, extra, this, on_rejected=NodeHandleResult()):
-    new_promise = G.add_obj_node(caller_ast, None, None)
+def promise_p_catch(G: Graph, call_ast, extra, this, on_rejected=NodeHandleResult()):
+    new_promise = G.add_obj_node(call_ast, None, None)
     old_promises = list(this.obj_nodes)
     saved_call_stack = G.call_stack
+    dummy_stmt_ast = G.get_child_nodes(
+        G.get_child_nodes(G.get_obj_def_ast_node(G.promise_p_then), child_type='AST_STMT_LIST')[0],
+        child_type='DUMMY_STMT')[0]
     def check_promise_status(self, G):
         nonlocal old_promises, on_rejected, extra
         prev_call_stack = G.call_stack
         G.call_stack = saved_call_stack
         for promise in old_promises:
             flag = False
+            if G.first_pass:
+                fulfilled_with = NodeHandleResult(values=[wildcard])
             fulfilled_with = G.get_node_attr(promise).get('fulfilled_with')
             if fulfilled_with is not None: # the promise is possibly fulfilled
                 G.set_node_attr(new_promise, ('fulfilled_with', fulfilled_with))
                 flag = True
+            if G.first_pass:
+                rejected_with = NodeHandleResult(values=[wildcard])
             rejected_with = G.get_node_attr(promise).get('rejected_with')
             if rejected_with is not None: # the promise is possibly rejected
                 result, _ = opgen.call_function(G, on_rejected.obj_nodes,
-                    args=[rejected_with], call_ast=caller_ast, promise_related=True)
+                    args=[rejected_with], promise_related=True,
+                    call_ast=dummy_stmt_ast if G.new_trace_rule else call_ast)
                 G.set_node_attr(new_promise, ('rejected_with', result))
                 flag = True
             # if flag: # the promise is neither fulfilled or rejected
@@ -2010,3 +2047,42 @@ def promise_resolve(G: Graph, caller_ast, extra, this, value=NodeHandleResult())
     G.add_obj_as_prop('constructor', parent_obj=promise, tobe_added_obj=G.promise_cons)
     G.set_node_attr(promise, ('fulfilled_with', value))
     return NodeHandleResult(obj_nodes=[promise], used_objs=to_obj_nodes(G, value, caller_ast))
+
+def setup_proxy(G: Graph):
+    proxy_cons = G.add_blank_func_to_scope('Proxy', scope=G.BASE_SCOPE, python_func=proxy_constructor)
+    proxy_prototype = G.get_prop_obj_nodes(prop_name='prototype', parent_obj=proxy_cons)[0]
+    G.proxy_cons = proxy_cons
+    G.builtin_constructors.append(proxy_cons)
+    G.proxy_prototype = proxy_prototype
+
+
+def proxy_constructor(G: Graph, caller_ast, extra, _, target=NodeHandleResult(), handler=NodeHandleResult()):
+    proxies = []
+    for tgt in target.obj_nodes:
+        for hdl in handler.obj_nodes:
+            applys = G.get_prop_obj_nodes(hdl, 'apply')
+            gets = G.get_prop_obj_nodes(hdl, 'get')
+            if applys:
+                for apply in applys:
+                    # proxy = G.add_obj_node(caller_ast, None, None)
+                    def wrapper(G: Graph, caller_ast, _extra, _this=NodeHandleResult(), *args):
+                        arg_list = G.add_obj_node(caller_ast, 'array', None)
+                        for i, arg in enumerate(args):
+                            for _arg in to_obj_nodes(G, arg, caller_ast):
+                                G.add_obj_as_prop(prop_name=str(i), parent_obj=arg_list, tobe_added_obj=_arg)
+                        if _this is None:
+                            print('Proxy: Cannot find _this!')
+                            _this = NodeHandleResult()
+                        returned_objs = opgen.call_func_obj(G, apply,
+                            _args=[NodeHandleResult(obj_nodes=[tgt]), _this, NodeHandleResult(obj_nodes=[arg_list])])[0]
+                        return NodeHandleResult(obj_nodes=returned_objs)
+                    proxies.append(G.add_blank_func_with_og_nodes(
+                        'proxied_func', python_func=wrapper))
+            if gets:
+                for get in gets:
+                    proxy = G.add_obj_node(caller_ast, None, None)
+                    G.add_obj_as_prop(prop_name=wildcard, parent_obj=proxy,
+                                        tobe_added_obj=get, kind='get')
+                    proxies.append(proxy)
+    return NodeHandleResult(obj_nodes=proxies)
+        

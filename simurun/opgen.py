@@ -474,7 +474,7 @@ def find_prop(G: Graph, parent_objs, prop_name, branches=None,
         # If the name node is not found, try wildcard (*).
         # If checking prototype pollution, add wildcard (*) results.
         if (not in_proto or G.check_ipt) and prop_name != wildcard and (
-                not name_node_found or G.check_proto_pollution or G.check_ipt):
+                not name_node_found or G.check_proto_pollution or G.check_ipt or G.first_pass):
             prop_name_node = G.get_prop_name_node(wildcard, parent_obj)
             if prop_name_node is not None:
                 wc_name_node_found = True
@@ -933,6 +933,16 @@ def handle_op_simple(G, ast_node, extra=ExtraInfo()):
     used_objs = list(set(used_objs))
     results = [wildcard]
     result_sources = [list(chain(used_objs, *sources1, *sources2))]
+    result_tags = [[]]
+    flag = G.get_node_attr(ast_node).get('flags:string[]')
+    if flag == 'BINARY_ADD': # for dynamic require's only
+        for i, v1 in enumerate(values1):
+            for j, v2 in enumerate(values2):
+                if v1 != wildcard and v2 != wildcard:
+                    if type(v1) == str and type(v2) == str:
+                        results.append(str(v1) + str(v2))
+                result_tags.append(tags1 + tags2)
+                result_sources.append((sources1[i] or []) + (sources2[j] or []))
     res = NodeHandleResult(ast_node=ast_node, values=results,
         used_objs=used_objs, value_sources=result_sources,
         callback=get_df_callback(G))
@@ -980,6 +990,7 @@ def handle_op_by_values(G, ast_node, extra=ExtraInfo(), combine=True, saved={}):
             for s in sources1 + sources2:
                 sources.update(s)
             result_sources.append(list(sources))
+            result_tags.append([])
     elif flag == 'BINARY_SUB':
         for i, v1 in enumerate(values1):
             for j, v2 in enumerate(values2):
@@ -993,11 +1004,34 @@ def handle_op_by_values(G, ast_node, extra=ExtraInfo(), combine=True, saved={}):
                 result_tags.append(tags1 + tags2)
                 result_sources.append((sources1[i] or []) + (sources2[j] or []))
         if len(values1) * len(values2) == 0:
+            # always returns at least one value
             results.append(wildcard)
             sources = set()
             for s in sources1 + sources2:
                 sources.update(s)
             result_sources.append(list(sources))
+            result_tags.append([])
+    elif flag == 'BINARY_MUL':
+        for i, v1 in enumerate(values1):
+            for j, v2 in enumerate(values2):
+                if v1 != wildcard and v2 != wildcard:
+                    if (type(v1) == int or type(v1) == float) and \
+                        (type(v2) == int or type(v2) == float):
+                        results.append(v1 * v2)
+                    else:
+                        results.append(float('nan'))
+                else:
+                    results.append(wildcard)
+                result_tags.append(tags1 + tags2)
+                result_sources.append((sources1[i] or []) + (sources2[j] or []))
+        if len(values1) * len(values2) == 0:
+            # always returns at least one value
+            results.append(wildcard)
+            sources = set()
+            for s in sources1 + sources2:
+                sources.update(s)
+            result_sources.append(list(sources))
+            result_tags.append([])
     if combine:
         results, result_sources = combine_values(results, result_sources)
     res = NodeHandleResult(ast_node=ast_node, values=results,
@@ -1199,11 +1233,11 @@ def handle_var(G: Graph, ast_node, side=None, extra=None):
         now_objs = G.cur_objs
         name_node = None
     elif var_name == '__filename':
-        return NodeHandleResult(name=var_name, values=[
-            G.get_cur_file_path()], ast_node=ast_node)
+        return NodeHandleResult(name=var_name,
+            values=[G.get_cur_file_path()], ast_node=ast_node)
     elif var_name == '__dirname':
-        return NodeHandleResult(name=var_name, values=[os.path.join(
-            G.get_cur_file_path(), '..')], ast_node=ast_node)
+        return NodeHandleResult(name=var_name,
+            values=[os.path.dirname(G.get_cur_file_path())], ast_node=ast_node)
     else:
         now_objs = []
         branches = extra.branches if extra else BranchTagContainer()
@@ -1816,7 +1850,10 @@ def handle_node(G: Graph, node_id, extra=None) -> NodeHandleResult:
             for n in G.get_ordered_ast_child_nodes(node_id):
                 logger.error(n, G.get_node_attr(n))
                 return None
-        cond = G.get_ordered_ast_child_nodes(cond)[0]
+        if G.get_node_attr(cond).get('type') != "NULL":
+            cond = G.get_ordered_ast_child_nodes(cond)[0]
+        else:
+            cond = None
         # switch scopes
         parent_scope = G.cur_scope
         G.cur_scope = G.add_scope('BLOCK_SCOPE', decl_ast=body,
@@ -1837,10 +1874,13 @@ def handle_node(G: Graph, node_id, extra=None) -> NodeHandleResult:
                     val_to_str(G.get_node_attr(obj).get('code'))) for obj in obj_nodes]))
 
             # check if the condition is met
-            check_result, deterministic, tag = check_condition(G, cond, extra)
+            if cond is not None:
+                check_result, deterministic, tag = check_condition(G, cond, extra)
+            else:
+                check_result, deterministic, tag = 0, True, None
             # avoid infinite loop
             if (not deterministic and counter >= max_count) or \
-                    check_result == 0 or (counter > 0 and G.first_pass):
+                    (counter >= 10 * max_count) or check_result == 0:
                 logger.debug('For loop {} finished'.format(node_id))
                 break
             G.last_stmts = [node_id]
@@ -1886,7 +1926,7 @@ def handle_node(G: Graph, node_id, extra=None) -> NodeHandleResult:
                 check_result, deterministic))
             # avoid infinite loop
             if (not deterministic and counter > G.call_limit) or check_result == 0 or \
-                    counter > 10 or G.first_pass:
+                    counter > 10 or (counter >= 1 and G.first_pass):
             # if (not deterministic and counter > 3) or check_result == 0 or \
             #         counter > 10 or (G.two_pass and G.first_pass):
                 logger.debug('For loop {} finished'.format(node_id))
@@ -2327,6 +2367,8 @@ def call_func_obj(G: Graph, func_obj, _args=[], _this=None, extra=None,
     # check if python function exists
     python_func = G.get_node_attr(func_obj).get('pythonfunc')
     if python_func: # special Python function
+        if _this is None:
+            _this = NodeHandleResult()
         if is_new:
             if func_obj in G.builtin_constructors:
                 logger.log(ATTENTION, f'Running Python function {func_obj} {python_func}...')
@@ -2523,6 +2565,7 @@ def call_func_obj(G: Graph, func_obj, _args=[], _this=None, extra=None,
                             G.set_node_attr(elem, ('tainted', True))
                             G.set_node_attr(elem, ('fake_arg', True))
                             # logger.debug("{} marked as tainted [2]".format(elem))
+                        added_objs = [added_obj]
                     elif (G.get_node_attr(G.get_ordered_ast_child_nodes(param)
                             [2]).get('type') == 'NULL'): # without default value
                         added_obj = G.add_obj_to_scope(name=param_name,
@@ -2530,28 +2573,34 @@ def call_func_obj(G: Graph, func_obj, _args=[], _this=None, extra=None,
                             # give __proto__ when checking prototype pollution
                             js_type='object' if G.check_proto_pollution
                             else None, value=wildcard)
+                        added_objs = [added_obj]
                     else:
                         child = G.get_ordered_ast_child_nodes(param)[2]
                         default_value = handle_node(G, child, extra)
-                        added_obj = to_obj_nodes(G, default_value, child)[0]
-                        G.add_obj_to_scope(name=param_name, scope=func_scope,
-                            tobe_added_obj=added_obj)
-                    if mark_fake_args:
-                        G.set_node_attr(added_obj, ('tainted', True))
-                        G.set_node_attr(added_obj, ('fake_arg', True))
-                        # logger.debug("{} marked as tainted [3]".format(added_obj))
-                    G.add_obj_as_prop(prop_name=str(j),
-                        parent_obj=arguments_obj, tobe_added_obj=added_obj)
-                    # add argument access path for function objs in args
-                    # (saved call edges) -- initial access paths
-                    if G.first_pass:
-                        G.set_node_attr(added_obj, ('arg_paths', {f'{func_scope}:{j}'}))
-                    logger.debug(f'add arg {param_name} <- new obj {added_obj}, '
-                            f'scope {func_scope}, ast node {param}')
+                        added_objs = to_obj_nodes(G, default_value, child)
+                        for added_obj in added_objs:
+                            G.add_obj_to_scope(name=param_name,
+                                scope=func_scope, tobe_added_obj=added_obj)
+                    for added_obj in added_objs: # Oh! What a big bug!
+                        if mark_fake_args:
+                            G.set_node_attr(added_obj, ('tainted', True))
+                            G.set_node_attr(added_obj, ('fake_arg', True))
+                            # logger.debug("{} marked as tainted [3]".format(added_obj))
+                        G.add_obj_as_prop(prop_name=str(j),
+                            parent_obj=arguments_obj, tobe_added_obj=added_obj)
+                        # add argument access path for function objs in args
+                        # (saved call edges) -- initial access paths
+                        if G.first_pass:
+                            G.set_node_attr(added_obj, ('arg_paths', {f'{func_scope}:{j}'}))
+                        logger.debug(f'add arg {param_name} <- new obj {added_obj}, '
+                                f'scope {func_scope}, ast node {param}')
                 elif j < 3:
                     # in case the function only use "arguments"
                     # but no parameters in its declaration
-                    added_obj = G.add_obj_node(ast_node=call_ast,
+                    added_obj = G.add_obj_node(ast_node=call_ast or func_ast,
+                        #                                           ↑
+                        # bug here, no definition AST causes traceback's failure
+                        #
                         # give __proto__ when checking prototype pollution
                         js_type='object' if G.check_proto_pollution
                         else None, value=wildcard)
@@ -3050,6 +3099,10 @@ def add_saved_cf(G, func_ast, call_ast, args, branches):
                     for callee_obj in callee_objs:
                         callee_ast = G.get_obj_def_ast_node(callee_obj, aim_type='function')
                         if callee_ast is None: continue
+                        if callee_ast == func_ast:
+                            logger.error(f'Error: recursive path propagation attempt:'
+                                         f'{callee_ast=} {func_ast=} {saved_args=} {branches=}')
+                            continue
                         callee_name = G.get_node_attr(callee_obj).get('name') or '?'
                         if G.get_node_attr(callee_ast).get('type') in [
                                 'AST_FUNC_DECL', 'AST_CLOSURE', 'AST_METHOD']:
@@ -3316,6 +3369,8 @@ def run_toplevel_file(G: Graph, node_id):
 
     if G.first_pass:
         empty_rough_stacks(G, reason='run_toplevel_file')
+    else:
+        empty_task_queues(G)
 
     # get current module.exports
     # because module.exports may be assigned to another object
@@ -3729,7 +3784,6 @@ def handle_require(G: Graph, caller_ast, extra, _, module_names):
                 else:
                     logger.error(f'File {start_id} has no children')
             if module_exports_objs:
-                returned_objs.update(module_exports_objs)
                 builtin_path = os.path.normpath(
                                     os.path.abspath(__file__) + '../../../builtin_packages')
                 if G.first_pass:
@@ -3740,7 +3794,13 @@ def handle_require(G: Graph, caller_ast, extra, _, module_names):
                             G.file_stack.append(G.get_node_file_path(file_ast_node))
                             empty_rough_stacks(G, reason='handle_require') # don't use this here
                             G.file_stack.pop()
+                            _module_exports_objs = module_exports_objs
                             module_exports_objs = run_toplevel_file(G, file_ast_node)
+                            unresolved_solved = G.get_node_attr(module_exports_objs[0]).get('unresolved') is None
+                            logger.info('old module.exports objs (unresolved) for {}: {}'.format(
+                                caller_ast, _module_exports_objs))
+                            logger.info('new module.exports objs after rerunning: {} {}'.format(
+                                module_exports_objs, unresolved_solved))
                         else:
                             logger.error('Error: module.exports {} is unresolved but file AST node is unknown'.format(module_exports_objs[0]))
                 if file_path != 'built-in' and \
@@ -3753,7 +3813,8 @@ def handle_require(G: Graph, caller_ast, extra, _, module_names):
                 if file_ast_node is not None:
                     module_exports_objs = \
                         [G.add_obj_node(js_type=None, value=wildcard)]
-        
+            returned_objs.update(module_exports_objs) # It wasn't here. What a huge bug!!
+
     returned_objs = list(returned_objs)
 
     # for a require call, we need to run traceback immediately
@@ -4510,12 +4571,16 @@ def call_function(G, func_objs, args=[], this=NodeHandleResult(), extra=None,
     if ((G.auto_exploit and not G.first_pass) and (
             func_name and func_name in signature_lists[G.vul_type] and args)):
         for payload in attack_dict.get(G.vul_type):
+            if G.exit_when_found and G.success_exploit:
+                break
             handled_arg = args[0]
             logger.info(sty.ef.b + '[AUTO] Constraint solver is solving for {}...'.format(G.cur_source_name) + sty.rs.all)
             G.solve_from = payload # payload string
             solution = solver.solve(G, handled_arg.obj_nodes, None,
                                     contains=True)
             for i, (assertions, results) in enumerate(solution):
+                if G.exit_when_found and G.success_exploit:
+                    break
                 logger.debug(f'{sty.ef.inverse}Constraints #{i+1}:{sty.rs.all}')
                 logger.debug(assertions)      
                 if results == 'failed':
@@ -4840,6 +4905,8 @@ def generate_obj_graph(G: Graph, entry_nodeid):
         logger.info('Running CF path search again...')
         for item in G.cf_searches:
             cf_search_complete(G, *item)
+    else:
+        empty_task_queues(G)
     G.finished_num_of_passes += 1
 
 def analyze_files(G, path, start_node_id=0, check_signatures=[]):

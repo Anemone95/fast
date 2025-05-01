@@ -32,8 +32,13 @@ def get_path_text(G, path, caller):
         except:
             pass
         if content is not None:
-            cur_path_str2 += "{}\t{}".format(start_lineno,
-                    ''.join(content[start_lineno:end_lineno + 1]))
+            for l in range(start_lineno, end_lineno + 1):
+                if 'function' in content[l]:
+                    content = ''.join(content[start_lineno:l + 1]).rstrip() + ' ... (omitted)\n'
+                    break
+            if type(content) is list:
+                content = ''.join(content[start_lineno:end_lineno + 1])
+            cur_path_str2 += "{}\t{}".format(start_lineno, content)
     cur_path_str1 += G.get_node_attr(caller).get('lineno:int', '?')
     G.logger.debug(cur_path_str1)
 
@@ -81,7 +86,6 @@ def traceback(G, vul_type, start_node=None):
             func_name = find_func_name(func_node)
         else:
             func_name = G.get_name_from_child(func_node, order=1)
-        # print('trace back func name', func_name, 'type', G.get_node_attr(func_node).get('type'))
         if func_name in expoit_func_list:
             caller = func_node
             caller = G.find_nearest_upper_CPG_node(caller)
@@ -128,7 +132,6 @@ def do_vul_checking(G, rule_list, pathes):
     for path in pathes:
         flag = True
         for trace_rule in trace_rules:
-            # print('path =', path)
             if not trace_rule.check(path):
                 flag = False
                 break
@@ -189,7 +192,7 @@ def vul_checking(G, pathes, vul_type):
             }
 
     rule_lists = vul_type_map[vul_type]
-    success_pathes = []
+    success_paths = []
     print('vul_checking', vul_type)
     """
     print(pathes)
@@ -198,9 +201,10 @@ def vul_checking(G, pathes, vul_type):
             print(G.get_node_attr(node))
     """
     for rule_list in rule_lists:
-        success_pathes += do_vul_checking(G, rule_list, pathes)
-    print("success: ", success_pathes)
-    return success_pathes
+        success_paths += do_vul_checking(G, rule_list, pathes)
+    # success_paths = list(map(lambda path: G.extend_path_by_cf(path), success_paths))
+    print("success: ", success_paths)
+    return success_paths
 
 def check_pp(G):
     print('Checking proto_pollution...')
