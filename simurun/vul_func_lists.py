@@ -4,7 +4,15 @@ signature_lists = {
             'sink_hqbpillvul_exec',
             'sink_hqbpillvul_execSync',
             'sink_hqbpillvul_spawn',
-            'sink_hqbpillvul_spawnSync'
+            'sink_hqbpillvul_spawnSync',
+            'sink_hqbpillvul_execa_shell',
+            'sink_hqbpillvul_shelljs_exec'
+            ],
+        'os_command_strict': [
+            'sink_hqbpillvul_exec',
+            'sink_hqbpillvul_execSync',
+            'sink_hqbpillvul_execa_shell',
+            'sink_hqbpillvul_shelljs_exec'
             ],
         'xss': [
             'sink_hqbpillvul_http_write',
