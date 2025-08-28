@@ -3078,46 +3078,46 @@ function walkDir(dir, parentNodeId, callback) {
 };
 
 function analyze(filePath, parentNodeId) {
-    // read the file
-    filename = filePath || 'stdin';
-    if (analyzedModules.includes(filename)) {
-        console.log(("Skipping " + filename).white.inverse);
-        return;
-    }
-    console.log(("Analyzing " + filename).green.inverse);
-    if (filePath == null) {
-        // read from stdin
-        filePath = 0;
-    }
-    sourceCode = fs.readFileSync(filePath, 'utf8');
-    sourceCode = sourceCode.replace(/^#!.*\n/, '\n');
-    sourceCode = sourceCode.replace(/\r\n/g, '\n');
-    // initialize
-    if (!program.expression) {
-        let currentId = nodeIdCounter;
-        if (outputStyle == 'php') {
-            if (parentNodeId !== null) {
-                relsStream.push([parentNodeId, currentId, 'DIRECTORY_OF'].join(delimiter) + '\n');
-            }
-            nodes[currentId] = {
-                label: 'Filesystem',
-                type: 'File',
-                name: filename
-            };
-        } else if (outputStyle == 'c') {
-            if (parentNodeId !== null) {
-                relsStream.push([parentNodeId, currentId, 'IS_DIRECTORY_OF'].join(delimiter) + '\n');
-            }
-            nodes[currentId] = {
-                label: 'Filesystem',
-                type: 'File',
-                name: filename
-            };
-        }
-        nodeIdCounter++;
-    }
     // parse
     try {
+        // read the file
+        filename = filePath || 'stdin';
+        if (analyzedModules.includes(filename)) {
+            console.log(("Skipping " + filename).white.inverse);
+            return;
+        }
+        console.log(("Analyzing " + filename).green.inverse);
+        if (filePath == null) {
+            // read from stdin
+            filePath = 0;
+        }
+        sourceCode = fs.readFileSync(filePath, 'utf8');
+        sourceCode = sourceCode.replace(/^#!.*\n/, '\n');
+        sourceCode = sourceCode.replace(/\r\n/g, '\n');
+        // initialize
+        if (!program.expression) {
+            let currentId = nodeIdCounter;
+            if (outputStyle == 'php') {
+                if (parentNodeId !== null) {
+                    relsStream.push([parentNodeId, currentId, 'DIRECTORY_OF'].join(delimiter) + '\n');
+                }
+                nodes[currentId] = {
+                    label: 'Filesystem',
+                    type: 'File',
+                    name: filename
+                };
+            } else if (outputStyle == 'c') {
+                if (parentNodeId !== null) {
+                    relsStream.push([parentNodeId, currentId, 'IS_DIRECTORY_OF'].join(delimiter) + '\n');
+                }
+                nodes[currentId] = {
+                    label: 'Filesystem',
+                    type: 'File',
+                    name: filename
+                };
+            }
+            nodeIdCounter++;
+        }
         var root = esprima.parseModule(sourceCode, {
             loc: true,
             range: true,
@@ -3130,85 +3130,89 @@ function analyze(filePath, parentNodeId) {
                 console.log(err.toString().lightRed);
             }
         }
-    } catch (e) {
-        console.log(e);
-    }
-    if (!stdoutMode) {
-        console.dir(root);
-    }
-    // console.log(JSON.stringify(root, null, 2));
-    let rootId = nodeIdCounter;
-    if (program.expression) {
-        root = root.body[0].expression;
-    }
-    dfs(root, rootId, rootId - 1, 0, null, null);
-    // output
-    for (var i in nodes) {
-        let u = nodes[i];
-        let label = u.label;
-        label = label == 'AST_V' ? 'AST' : u.label; // AST_V -> AST
-        let childNum = u.childNum === 0 ? 0 : u.childNum || '';
-        if (outputStyle == 'php') {
-            // process and quote code
-            // let code = u.operator || u.code || null;
-            let quote = function (input, mode) {
-                let quoted = input || null;
-                if (quoted === undefined || quoted === null) {
-                    quoted = '';
-                } else {
-                    if (quoted.length > 1024) {
-                        quoted = quoted.substr(0, 1024);
+        if (!stdoutMode) {
+            console.dir(root);
+        }
+        // console.log(JSON.stringify(root, null, 2));
+        let rootId = nodeIdCounter;
+        if (program.expression) {
+            root = root.body[0].expression;
+        }
+        dfs(root, rootId, rootId - 1, 0, null, null);
+        // output
+        for (var i in nodes) {
+            let u = nodes[i];
+            let label = u.label;
+            label = label == 'AST_V' ? 'AST' : u.label; // AST_V -> AST
+            let childNum = u.childNum === 0 ? 0 : u.childNum || '';
+            if (outputStyle == 'php') {
+                // process and quote code
+                // let code = u.operator || u.code || null;
+                let quote = function (input, mode) {
+                    let quoted = input || null;
+                    if (quoted === undefined || quoted === null) {
+                        quoted = '';
+                    } else {
+                        if (quoted.length > 1024) {
+                            quoted = quoted.substr(0, 1024);
+                        }
+                        switch (mode) {
+                            case 1:
+                                quoted = quoted.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n|\r/g, '\\\\n').replace(/\t/g, '\\t');
+                                break;
+                            default:
+                                quoted = quoted.replace(/\n|\r/g, '').replace(/\t/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                                break;
+                        }
+                        quoted = '"' + quoted + '"';
                     }
-                    switch (mode) {
-                        case 1:
-                            quoted = quoted.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n|\r/g, '\\\\n').replace(/\t/g, '\\t');
-                            break;
-                        default:
-                            quoted = quoted.replace(/\n|\r/g, '').replace(/\t/g, ' ').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                            break;
-                    }
-                    quoted = '"' + quoted + '"';
+                    return quoted;
                 }
-                return quoted;
+                let location = u.lineLocStart ? [u.lineLocStart, u.colLocStart || '', u.lineLocEnd || u.lineLocStart, u.colLocEnd || ''].join(':') : '';
+                nodesStream.push([i, label, u.phptype || u.type, u.phpflag || '',
+                    u.lineLocStart !== null ? u.lineLocStart : '', quote(u.code), childNum, u.funcId || '',
+                    '', location, u.lineLocEnd !== null ? u.lineLocEnd : '', u.name || '', quote(u.comment, 1)
+                ].join(delimiter) + '\n');
+            } else if (outputStyle == 'c') {
+                if (i == 0) continue;
+                label = 'ANR';
+                let location = u.lineLocStart ? [u.lineLocStart, u.colLocStart || 0, u.lineLocEnd || '', u.colLocEnd || 0].join(':') : '';
+                let code = u.code || u.name || '';
+                if (delimiter != ',') {
+                    code = code.replace(/\t|\n/g, '');
+                }
+                if (code.search(/\s|,|"/) != -1) {
+                    code = '"' + code.replace(/"/g, '\"\"') + '"';
+                }
+                nodesStream.push([label, i, u.ctype || u.type, code, location,
+                    u.funcId || '', childNum, '', u.operator || '', '', '', ''
+                ].join(delimiter) + '\n');
             }
-            let location = u.lineLocStart ? [u.lineLocStart, u.colLocStart || '', u.lineLocEnd || u.lineLocStart, u.colLocEnd || ''].join(':') : '';
-            nodesStream.push([i, label, u.phptype || u.type, u.phpflag || '',
-                u.lineLocStart !== null ? u.lineLocStart : '', quote(u.code), childNum, u.funcId || '',
-                '', location, u.lineLocEnd !== null ? u.lineLocEnd : '', u.name || '', quote(u.comment, 1)
-            ].join(delimiter) + '\n');
-        } else if (outputStyle == 'c') {
-            if (i == 0) continue;
-            label = 'ANR';
-            let location = u.lineLocStart ? [u.lineLocStart, u.colLocStart || 0, u.lineLocEnd || '', u.colLocEnd || 0].join(':') : '';
-            let code = u.code || u.name || '';
-            if (delimiter != ',') {
-                code = code.replace(/\t|\n/g, '');
-            }
-            if (code.search(/\s|,|"/) != -1) {
-                code = '"' + code.replace(/"/g, '\"\"') + '"';
-            }
-            nodesStream.push([label, i, u.ctype || u.type, code, location,
-                u.funcId || '', childNum, '', u.operator || '', '', '', ''
-            ].join(delimiter) + '\n');
         }
-    }
 
-    if (!program.expression) {
-        if (outputStyle == 'php') {
-            relsStream.push([rootId - 1, rootId, 'FILE_OF'].join(delimiter) + '\n');
-        } else if (outputStyle == 'c') {
-            relsStream.push([rootId - 1, rootId, 'IS_FILE_OF'].join(delimiter) + '\n');
+        if (!program.expression) {
+            if (outputStyle == 'php') {
+                relsStream.push([rootId - 1, rootId, 'FILE_OF'].join(delimiter) + '\n');
+            } else if (outputStyle == 'c') {
+                relsStream.push([rootId - 1, rootId, 'IS_FILE_OF'].join(delimiter) + '\n');
+            }
         }
+
+        nodeIdCounter++;
+        nodes = []; // reset the node array but not the nodeIdCounter
+
+        analyzedModules.push(filePath);
+    } catch (e) {
+        console.error(e);
     }
-
-    nodeIdCounter++;
-    nodes = []; // reset the node array but not the nodeIdCounter
-
-    analyzedModules.push(filePath);
 };
 
 // main
 
+function getMemoryLimit(){
+    return Math.ceil(require("v8").getHeapStatistics().heap_size_limit / 1048576);
+}
+console.error(`Memory limit is ${getMemoryLimit()}MB`)
 if (program.search) {
     if (program.search === true)
         program.search = '.';
